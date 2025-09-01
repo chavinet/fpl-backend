@@ -294,9 +294,10 @@ async def internal_error_handler(request, exc):
 # Run the app
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+    print(f"🚀 Starting server on port {port}")
     uvicorn.run(
-        app,  # Changed from "main:app" to just app
+        "main:app",  # Use string format for Railway
         host="0.0.0.0",
         port=port,
-        reload=True if os.environ.get("ENVIRONMENT") == "development" else False
+        reload=False  # Disable reload in production
     )

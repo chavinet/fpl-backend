@@ -295,7 +295,7 @@ async def internal_error_handler(request, exc):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(
-        "main:app",
+        app,  # Changed from "main:app" to just app
         host="0.0.0.0",
         port=port,
         reload=True if os.environ.get("ENVIRONMENT") == "development" else False

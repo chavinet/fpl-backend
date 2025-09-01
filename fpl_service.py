@@ -297,43 +297,150 @@ class FPLService:
             print(f"Error getting player trends: {e}")
             return {"error": str(e), "trends": []}
     
+    # REPLACE the get_captain_analysis_from_db function in fpl_service.py with this simpler version:
+
     def get_captain_analysis_from_db(self, league_id: int) -> Dict:
-        """Get captain choices analysis for the league"""
+        """Get captain choices analysis - SIMPLE & ROBUST VERSION"""
         try:
-            df = fpl_db.get_captain_analysis(league_id)
-            if df.empty:
-                return {"analysis": [], "message": "No captain data found"}
+            # Step 1: Get all gameweek data for this league
+            print(f"🔍 Getting data for league {league_id}...")
             
-            # Analyze captain choices
-            captain_stats = df.groupby('captain').agg({
-                'points': ['count', 'mean', 'sum'],
-                'gameweek': 'nunique'
-            }).round(1)
+            gameweek_response = fpl_db.client.table('gameweek_data')\
+                .select('*')\
+                .eq('league_id', league_id)\
+                .execute()
             
+            if not gameweek_response.data:
+                return {"analysis": [], "message": "No gameweek data found"}
+            
+            print(f"📊 Found {len(gameweek_response.data)} gameweek records")
+            
+            # Step 2: Get player names
+            players_response = fpl_db.client.table('league_players')\
+                .select('*')\
+                .eq('league_id', league_id)\
+                .execute()
+            
+            # Create a lookup dict for player names
+            player_lookup = {}
+            if players_response.data:
+                for player in players_response.data:
+                    player_lookup[player['entry_id']] = {
+                        'player_name': player['player_name'],
+                        'team_name': player['team_name']
+                    }
+            
+            print(f"👥 Found {len(player_lookup)} players")
+            
+            # Step 3: Process the data
+            fpl_managers_data = []
+            captain_stats = {}
+            
+            for record in gameweek_response.data:
+                entry_id = record.get('entry_id')
+                captain = record.get('captain', '').strip()
+                vice_captain = record.get('vice_captain', '').strip()
+                
+                # Get player info
+                player_info = player_lookup.get(entry_id, {
+                    'player_name': 'Unknown Player',
+                    'team_name': 'Unknown Team'
+                })
+                
+                # Add to FPL managers data
+                manager_record = {
+                    "fpl_manager": player_info['player_name'],
+                    "team_name": player_info['team_name'],
+                    "entry_id": entry_id,
+                    "gameweek": record.get('gameweek', 0),
+                    "total_points": record.get('total_points', 0),
+                    "gameweek_points": record.get('points', 0),
+                    "captain": captain if captain and captain != 'Unknown' else 'No Captain',
+                    "vice_captain": vice_captain if vice_captain and vice_captain != 'Unknown' else 'No Vice-Captain',
+                    "transfers_cost": record.get('transfers_cost', 0),
+                    "team_value": round(record.get('team_value', 0) / 10, 1) if record.get('team_value') else 0,
+                    "active_chip": record.get('active_chip'),
+                    "points_on_bench": record.get('points_on_bench', 0)
+                }
+                
+                fpl_managers_data.append(manager_record)
+                
+                # Count captain stats (only for valid captains)
+                if captain and captain != 'Unknown' and captain.strip():
+                    if captain not in captain_stats:
+                        captain_stats[captain] = {
+                            'times_captained': 0,
+                            'total_points': 0,
+                            'points_list': []
+                        }
+                    
+                    captain_stats[captain]['times_captained'] += 1
+                    captain_stats[captain]['total_points'] += record.get('points', 0)
+                    captain_stats[captain]['points_list'].append(record.get('points', 0))
+            
+            # Step 4: Process captain statistics
             captain_analysis = []
-            for captain in captain_stats.index:
-                if captain and captain != "Unknown":
-                    stats = captain_stats.loc[captain]
+            for captain_name, stats in captain_stats.items():
+                if stats['times_captained'] > 0:
                     captain_analysis.append({
-                        "player_name": captain,
-                        "times_captained": int(stats[('points', 'count')]),
-                        "average_points": float(stats[('points', 'mean')]),
-                        "total_points": int(stats[('points', 'sum')]),
-                        "gameweeks_captained": int(stats[('gameweek', 'nunique')])
+                        "player_name": captain_name,
+                        "times_captained": stats['times_captained'],
+                        "total_points": stats['total_points'],
+                        "average_points": round(stats['total_points'] / stats['times_captained'], 1),
+                        "best_performance": max(stats['points_list']) if stats['points_list'] else 0,
+                        "worst_performance": min(stats['points_list']) if stats['points_list'] else 0
                     })
             
-            # Sort by total points
+            # Sort captain analysis by total points
             captain_analysis.sort(key=lambda x: x['total_points'], reverse=True)
+            
+            # Sort FPL managers by total points
+            fpl_managers_data.sort(key=lambda x: x['total_points'], reverse=True)
+            
+            # Step 5: Get latest gameweek summary
+            if fpl_managers_data:
+                latest_gw = max(record['gameweek'] for record in fpl_managers_data)
+                latest_gw_data = [record for record in fpl_managers_data if record['gameweek'] == latest_gw]
+                latest_gw_data.sort(key=lambda x: x['gameweek_points'], reverse=True)
+            else:
+                latest_gw = 0
+                latest_gw_data = []
+            
+            print(f"✅ Analysis complete - {len(fpl_managers_data)} total records, {len(captain_analysis)} unique captains")
             
             return {
                 "league_id": league_id,
-                "total_captains": len(captain_analysis),
-                "analysis": captain_analysis[:10]  # Top 10 captains
+                "latest_gameweek": latest_gw,
+                "total_records": len(fpl_managers_data),
+                "total_unique_captains": len(captain_analysis),
+                
+                # All FPL managers with their details (what you requested!)
+                "fpl_managers_data": fpl_managers_data,
+                
+                # Captain performance analysis
+                "captain_performance": captain_analysis,
+                
+                # Latest gameweek captain choices
+                "latest_gameweek_captains": latest_gw_data,
+                
+                # Quick summary stats
+                "summary": {
+                    "most_popular_captain": captain_analysis[0]["player_name"] if captain_analysis else "None",
+                    "best_captain_average": captain_analysis[0]["average_points"] if captain_analysis else 0,
+                    "total_managers": len(set(record['entry_id'] for record in fpl_managers_data)),
+                    "total_gameweeks": len(set(record['gameweek'] for record in fpl_managers_data))
+                }
             }
             
         except Exception as e:
-            print(f"Error getting captain analysis: {e}")
-            return {"error": str(e), "analysis": []}
+            print(f"❌ Error in captain analysis: {e}")
+            import traceback
+            print(f"📝 Full error: {traceback.format_exc()}")
+            return {
+                "error": str(e), 
+                "analysis": [],
+                "message": "Internal error occurred - check server logs"
+            }
     
     def get_league_summary_from_db(self, league_id: int) -> Dict:
         """Get comprehensive league summary with all stats"""
@@ -366,6 +473,39 @@ class FPLService:
         except Exception as e:
             print(f"Error getting league summary: {e}")
             return {"error": str(e), "league_id": league_id}
+        
+
+    # Also add this DEBUG function to your fpl_service.py
+    def debug_captain_data(self, league_id: int) -> Dict:
+        """Debug function to see what captain data exists"""
+        try:
+            # Get all gameweek data for this league
+            response = fpl_db.client.table('gameweek_data')\
+                .select('captain, vice_captain, points, gameweek, entry_id')\
+                .eq('league_id', league_id)\
+                .execute()
+            
+            df = pd.DataFrame(response.data) if response.data else pd.DataFrame()
+            
+            if df.empty:
+                return {"error": "No gameweek data found at all"}
+            
+            # Analyze captain data
+            captain_info = {
+                "total_records": len(df),
+                "records_with_captain": len(df[df['captain'].notna()]),
+                "unique_captains": df['captain'].nunique(),
+                "sample_captains": df['captain'].value_counts().head(10).to_dict(),
+                "null_captains": len(df[df['captain'].isnull()]),
+                "empty_captains": len(df[df['captain'] == '']),
+                "unknown_captains": len(df[df['captain'] == 'Unknown']),
+                "sample_data": df[['captain', 'vice_captain', 'points', 'gameweek']].head(5).to_dict('records')
+            }
+            
+            return captain_info
+            
+        except Exception as e:
+            return {"error": str(e)}
 
 # Initialize FPL service
 fpl_service = FPLService()

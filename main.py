@@ -80,47 +80,41 @@ async def health_check():
 # Data collection endpoints
 @app.post("/collect-data/{league_id}")
 async def collect_league_data(league_id: int, background_tasks: BackgroundTasks):
-    """
-    Collect fresh data from FPL API for a specific league
-    This runs in background to avoid timeout
-    """
+    """Collect fresh data from FPL API using normalized schema"""
     try:
-        # Add the data collection task to background
-        background_tasks.add_task(process_league_data_background, league_id)
+        background_tasks.add_task(process_league_data_background_normalized, league_id)
         
         return {
             "message": f"Data collection started for league {league_id}",
             "league_id": league_id,
             "status": "processing",
-            "note": "Check /league/{league_id}/standings in a few minutes for updated data"
+            "note": "Using normalized schema - no duplicate players across leagues"
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start data collection: {str(e)}")
 
-async def process_league_data_background(league_id: int):
-    """Background task to process league data"""
+async def process_league_data_background_normalized(league_id: int):
+    """Background task using normalized schema"""
     try:
-        print(f"🔄 Starting background data collection for league {league_id}")
-        df_gameweek, df_chips = fpl_service.process_league_data(league_id, store_in_db=True)
-        print(f"✅ Background data collection completed for league {league_id}")
+        print(f"Starting normalized data collection for league {league_id}")
+        df_gameweek, df_chips = fpl_service.process_league_data_normalized(league_id, store_in_db=True)
+        print(f"Normalized data collection completed for league {league_id}")
     except Exception as e:
-        print(f"❌ Background data collection failed for league {league_id}: {e}")
+        print(f"Normalized data collection failed for league {league_id}: {e}")
 
 @app.post("/collect-data-sync/{league_id}")
 async def collect_league_data_sync(league_id: int):
-    """
-    Collect fresh data from FPL API synchronously (may take time)
-    Use this for testing or when you need immediate results
-    """
+    """Collect fresh data synchronously using normalized schema"""
     try:
-        df_gameweek, df_chips = fpl_service.process_league_data(league_id, store_in_db=True)
+        df_gameweek, df_chips = fpl_service.process_league_data_normalized(league_id, store_in_db=True)
         
         return {
             "message": "Data collection completed successfully",
             "league_id": league_id,
             "players_processed": len(df_gameweek),
             "chips_processed": len(df_chips),
+            "schema": "normalized",
             "timestamp": datetime.now().isoformat()
         }
         
@@ -128,11 +122,11 @@ async def collect_league_data_sync(league_id: int):
         raise HTTPException(status_code=500, detail=f"Data collection failed: {str(e)}")
 
 # League endpoints
-@app.get("/league/{league_id}/standings", response_model=Dict[str, Any])
+@app.get("/league/{league_id}/standings")
 async def get_league_standings(league_id: int, gameweek: Optional[int] = None):
-    """Get current or specific gameweek standings for a league"""
+    """Get league standings using normalized schema"""
     try:
-        standings = fpl_service.get_league_standings_from_db(league_id, gameweek)
+        standings = fpl_service.get_league_standings_from_db_normalized(league_id, gameweek)
         
         if "error" in standings:
             raise HTTPException(status_code=404, detail=standings["error"])
@@ -162,9 +156,9 @@ async def get_league_summary(league_id: int):
 
 @app.get("/league/{league_id}/captain-analysis")
 async def get_captain_analysis(league_id: int):
-    """Get captain choices analysis for the league"""
+    """Get captain analysis using normalized schema"""
     try:
-        analysis = fpl_service.get_captain_analysis_from_db(league_id)
+        analysis = fpl_service.get_captain_analysis_from_db_normalized(league_id)
         
         if "error" in analysis:
             raise HTTPException(status_code=404, detail=analysis["error"])
@@ -226,6 +220,125 @@ async def get_player_history(entry_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get player history: {str(e)}")
+
+# NEW ENDPOINT: Cross-league player analysis
+@app.get("/player/{entry_id}/cross-league-analysis")
+async def get_cross_league_analysis(entry_id: int):
+    """Get player's performance across all leagues they participate in"""
+    try:
+        analysis = fpl_service.get_player_cross_league_analysis(entry_id)
+        
+        if "error" in analysis:
+            raise HTTPException(status_code=404, detail=analysis["error"])
+        
+        return analysis
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get cross-league analysis: {str(e)}")
+
+# NEW ENDPOINT: Global player search
+@app.get("/players/search/{player_name}")
+async def search_global_players(player_name: str):
+    """Search for players across all leagues by name"""
+    try:
+        response = fpl_db.client.table('global_players')\
+            .select('entry_id, player_name, current_team_name')\
+            .ilike('player_name', f'%{player_name}%')\
+            .limit(20)\
+            .execute()
+        
+        if not response.data:
+            return {"players": [], "message": "No players found"}
+        
+        players = []
+        for player in response.data:
+            # Get leagues this player participates in
+            leagues_response = fpl_db.client.table('league_memberships')\
+                .select('league_id, leagues(name)')\
+                .eq('entry_id', player['entry_id'])\
+                .execute()
+            
+            player_leagues = []
+            if leagues_response.data:
+                for membership in leagues_response.data:
+                    league_info = membership.get('leagues', {})
+                    if isinstance(league_info, list) and len(league_info) > 0:
+                        league_info = league_info[0]
+                    
+                    player_leagues.append({
+                        "league_id": membership['league_id'],
+                        "league_name": league_info.get('name', f"League {membership['league_id']}")
+                    })
+            
+            players.append({
+                "entry_id": player['entry_id'],
+                "player_name": player['player_name'],
+                "current_team_name": player['current_team_name'],
+                "leagues": player_leagues,
+                "total_leagues": len(player_leagues)
+            })
+        
+        return {
+            "search_term": player_name,
+            "total_found": len(players),
+            "players": players
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Player search failed: {str(e)}")
+
+# NEW ENDPOINT: League statistics
+@app.get("/league/{league_id}/stats")
+async def get_league_statistics(league_id: int):
+    """Get comprehensive league statistics"""
+    try:
+        # Get basic league info
+        league_response = fpl_db.client.table('leagues')\
+            .select('*')\
+            .eq('id', league_id)\
+            .execute()
+        
+        if not league_response.data:
+            raise HTTPException(status_code=404, detail="League not found")
+        
+        # Get membership count and player diversity
+        memberships = fpl_db.client.table('league_memberships')\
+            .select('entry_id')\
+            .eq('league_id', league_id)\
+            .execute()
+        
+        # Get gameweek data for stats
+        gameweek_data = fpl_db.client.table('gameweek_data_new')\
+            .select('*')\
+            .eq('league_id', league_id)\
+            .execute()
+        
+        stats = {
+            "league_info": league_response.data[0],
+            "total_players": len(memberships.data) if memberships.data else 0,
+            "total_gameweeks": len(set(gw['gameweek'] for gw in gameweek_data.data)) if gameweek_data.data else 0,
+            "total_records": len(gameweek_data.data) if gameweek_data.data else 0
+        }
+        
+        if gameweek_data.data:
+            points = [gw['points'] for gw in gameweek_data.data if gw['points']]
+            if points:
+                stats.update({
+                    "highest_gameweek_score": max(points),
+                    "lowest_gameweek_score": min(points),
+                    "average_gameweek_score": round(sum(points) / len(points), 1),
+                    "total_transfers": sum(gw['transfers'] or 0 for gw in gameweek_data.data),
+                    "total_transfer_costs": sum(gw['transfers_cost'] or 0 for gw in gameweek_data.data)
+                })
+        
+        return stats
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get league statistics: {str(e)}")
 
 # Utility endpoints
 @app.get("/gameweek/current")

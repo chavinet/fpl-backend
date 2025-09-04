@@ -1,3 +1,5 @@
+# fpl_service.py - Improved version with better error handling
+
 import pandas as pd
 import json
 import requests
@@ -14,243 +16,329 @@ class FPLService:
     def __init__(self):
         self.base_url = "https://fantasy.premierleague.com/api"
         self.session = requests.Session()
-        self.session.verify = False  # Match your original script
+        self.session.verify = False
+        self.max_retries = 3
+        self.retry_delay = 1.0
         
     def get_current_gameweek(self) -> int:
-        """Get current gameweek number from FPL API"""
-        try:
-            response = self.session.get(f'{self.base_url}/bootstrap-static/')
-            fplurl = response.json()
-            fplgw = json_normalize(fplurl['events'])
-            
-            for i in range(len(fplgw)):
-                if fplgw.is_current[i]:
-                    current_gw = int(fplgw.id[i])
-                    # Update database with current gameweek
-                    fpl_db.update_current_gameweek(current_gw)
-                    return current_gw
-            return 1
-        except Exception as e:
-            print(f"Error getting current gameweek: {e}")
-            # Fallback to database
-            return fpl_db.get_current_gameweek()
+        """Get current gameweek number from FPL API with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.get(f'{self.base_url}/bootstrap-static/', timeout=10)
+                response.raise_for_status()
+                fplurl = response.json()
+                fplgw = json_normalize(fplurl['events'])
+                
+                for i in range(len(fplgw)):
+                    if fplgw.is_current[i]:
+                        current_gw = int(fplgw.id[i])
+                        return current_gw
+                return 1
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+                else:
+                    print(f"All attempts failed, using fallback")
+                    return fpl_db.get_current_gameweek() or 1
     
     def get_league_info(self, league_id: int) -> Dict:
-        """Get league information and standings"""
-        try:
-            response = self.session.get(f'{self.base_url}/leagues-classic/{league_id}/standings/')
-            league_data = response.json()
-            return league_data
-        except Exception as e:
-            print(f"Error getting league info: {e}")
-            return {}
+        """Get league information and standings with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.get(f'{self.base_url}/leagues-classic/{league_id}/standings/', timeout=15)
+                response.raise_for_status()
+                league_data = response.json()
+                return league_data
+            except Exception as e:
+                print(f"League info attempt {attempt + 1} failed: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+                else:
+                    print(f"Failed to get league {league_id} after {self.max_retries} attempts")
+                    return {}
     
     def get_footballers_data(self) -> pd.DataFrame:
-        """Get all FPL players data (for captain/vice-captain names)"""
-        try:
-            response = self.session.get(f'{self.base_url}/bootstrap-static/')
-            bootstrap_data = response.json()
-            return pd.DataFrame.from_records(bootstrap_data['elements'])
-        except Exception as e:
-            print(f"Error getting footballers data: {e}")
-            return pd.DataFrame()
+        """Get all FPL players data with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.get(f'{self.base_url}/bootstrap-static/', timeout=15)
+                response.raise_for_status()
+                bootstrap_data = response.json()
+                return pd.DataFrame.from_records(bootstrap_data['elements'])
+            except Exception as e:
+                print(f"Footballers data attempt {attempt + 1} failed: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (attempt + 1))
+                else:
+                    return pd.DataFrame()
     
     def get_player_history(self, entry_id: int) -> Dict:
-        """Get player's full history"""
-        try:
-            response = self.session.get(f'{self.base_url}/entry/{entry_id}/history/')
-            return response.json()
-        except Exception as e:
-            print(f"Error getting player {entry_id} history: {e}")
-            return {}
+        """Get player's full history with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.get(f'{self.base_url}/entry/{entry_id}/history/', timeout=10)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    print(f"Failed to get player {entry_id} history after {self.max_retries} attempts: {e}")
+                    return {}
     
     def get_player_gameweek_picks(self, entry_id: int, gameweek: int) -> Dict:
-        """Get player's picks for specific gameweek"""
-        try:
-            response = self.session.get(f'{self.base_url}/entry/{entry_id}/event/{gameweek}/picks/')
-            return response.json()
-        except Exception as e:
-            print(f"Error getting player {entry_id} gameweek {gameweek} picks: {e}")
-            return {}
+        """Get player's picks for specific gameweek with retries"""
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.get(f'{self.base_url}/entry/{entry_id}/event/{gameweek}/picks/', timeout=10)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                else:
+                    print(f"Failed to get player {entry_id} GW {gameweek} picks: {e}")
+                    return {}
     
-    def process_league_data(self, league_id: int, store_in_db: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def process_league_data_normalized(self, league_id: int, store_in_db: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Your original logic enhanced with Supabase storage
-        Returns (gameweek_data_df, chips_df)
+        Process league data using normalized schema with PROPER ordering and error handling
         """
-        print(f"🏈 Processing league {league_id}...")
+        print(f"Processing league {league_id} with normalized schema...")
         
-        # Initialize DataFrames
         dfresults = pd.DataFrame()
         dfresultschips = pd.DataFrame()
         
-        # Get current gameweek
-        current_gw = self.get_current_gameweek()
-        print(f"📅 Current gameweek: {current_gw}")
-        
-        # Get league data
-        league_data = self.get_league_info(league_id)
-        if not league_data or 'standings' not in league_data:
-            print("❌ No league data found")
-            return dfresults, dfresultschips
-        
-        # Store league info in database
-        if store_in_db:
-            league_name = league_data.get('league', {}).get('name', f'League {league_id}')
-            success = fpl_db.store_league_info(league_id, league_name)
-            print(f"💾 League info stored: {'✅' if success else '❌'}")
-        
-        # Process standings
-        dfleague = pd.DataFrame.from_records(league_data['standings']['results'])
-        number_players = len(dfleague.index)
-        print(f"👥 Processing {number_players} players...")
-        
-        # Store players in database
-        if store_in_db:
-            success = fpl_db.store_players(league_id, dfleague)
-            print(f"👤 Players stored: {'✅' if success else '❌'}")
-        
-        # Get footballers data for captain/vice-captain names
-        dffootballers = self.get_footballers_data()
-        if dffootballers.empty:
-            print("⚠️ Warning: Could not get footballers data")
-            return dfresults, dfresultschips
-        
-        # Process each player
-        for j in range(number_players):
-            entry_id = dfleague.entry[j]
-            player_name = dfleague.player_name[j]
-            print(f"🔄 Processing player {j+1}/{number_players}: {player_name}")
+        try:
+            # Step 1: Update current gameweek
+            fpl_db.update_current_gameweek()
+            current_gw = fpl_db.get_current_gameweek()
+            print(f"Current gameweek: {current_gw}")
             
-            try:
-                # Get player history
-                player_json = self.get_player_history(entry_id)
-                if not player_json or 'current' not in player_json:
-                    print(f"⚠️ Warning: No data for player {player_name}")
-                    continue
+            # Step 2: Get league data
+            league_data = self.get_league_info(league_id)
+            if not league_data or 'standings' not in league_data:
+                print("❌ No league data found")
+                return dfresults, dfresultschips
+            
+            # Step 3: Store league info FIRST
+            if store_in_db:
+                league_name = league_data.get('league', {}).get('name', f'League {league_id}')
+                league_success = fpl_db.store_league_info(league_id, league_name)
+                print(f"League info stored: {'✅' if league_success else '❌'} - {league_name}")
+            
+            # Step 4: Process league standings
+            dfleague = pd.DataFrame.from_records(league_data['standings']['results'])
+            number_players = len(dfleague.index)
+            print(f"Found {number_players} players in league")
+            
+            if number_players == 0:
+                print("❌ No players found in league")
+                return dfresults, dfresultschips
+            
+            # Step 5: CRITICAL - Store global players FIRST (they must exist before foreign key references)
+            if store_in_db:
+                print("🔄 Step 1/4: Storing global players (required for foreign keys)...")
+                players_success = fpl_db.store_global_players(dfleague)
+                print(f"Global players stored: {'✅' if players_success else '❌'}")
                 
-                # Process current season data
-                dfplayer = pd.DataFrame.from_records(player_json['current'])
-                if dfplayer.empty:
-                    continue
+                if not players_success:
+                    print("❌ CRITICAL: Failed to store global players - cannot proceed with gameweek data")
+                    return dfresults, dfresultschips
                 
-                # Calculate points net (your original logic)
-                points_net = dfplayer['points'] - dfplayer['event_transfers_cost']
-                dfplayer.insert(2, 'pointsnet', points_net, True)
-                dfplayer['value'] = dfplayer['value'] / 10
-                
-                # Get captain & vice-captain for current gameweek
-                captain_name = "Unknown"
-                vice_captain_name = "Unknown"
-                active_chip = None
+                # Step 6: Store league memberships (depends on global_players)
+                print("🔄 Step 2/4: Storing league memberships...")
+                memberships_success = fpl_db.store_league_memberships(league_id, dfleague)
+                print(f"League memberships stored: {'✅' if memberships_success else '❌'}")
+            
+            # Step 7: Get and store footballers data (independent, can be done anytime)
+            print("🔄 Step 3/4: Getting FPL footballers data...")
+            dffootballers = self.get_footballers_data()
+            if dffootballers.empty:
+                print("⚠️  Warning: Could not get footballers data - captain names may be missing")
+                # Don't return here - we can still process without captain names
+            
+            if store_in_db and not dffootballers.empty:
+                footballers_success = fpl_db.store_fpl_footballers(dffootballers)
+                print(f"FPL footballers stored: {'✅' if footballers_success else '❌'}")
+            
+            # Step 8: Process each player's gameweek data (AFTER players are stored)
+            print("🔄 Step 4/4: Processing individual player gameweek data...")
+            
+            successful_players = 0
+            failed_players = 0
+            
+            for j in range(number_players):
+                entry_id = dfleague.entry[j]
+                player_name = dfleague.player_name[j]
+                print(f"Processing player {j+1}/{number_players}: {player_name} (ID: {entry_id})")
                 
                 try:
-                    player_gw_json = self.get_player_gameweek_picks(entry_id, current_gw)
-                    if player_gw_json and 'picks' in player_gw_json:
-                        dfplayergw = pd.DataFrame.from_records(player_gw_json['picks'])
-                        
-                        if not dfplayergw.empty:
-                            # Get captain and vice-captain IDs
-                            captain_picks = dfplayergw[dfplayergw.is_captain == True]
-                            vice_captain_picks = dfplayergw[dfplayergw.is_vice_captain == True]
-                            
-                            if not captain_picks.empty:
-                                captain_id = int(captain_picks.element.iloc[0])
-                                captain_row = dffootballers[dffootballers.id == captain_id]
-                                if not captain_row.empty:
-                                    captain_name = captain_row.web_name.item()
-                            
-                            if not vice_captain_picks.empty:
-                                vice_captain_id = int(vice_captain_picks.element.iloc[0])
-                                vice_captain_row = dffootballers[dffootballers.id == vice_captain_id]
-                                if not vice_captain_row.empty:
-                                    vice_captain_name = vice_captain_row.web_name.item()
-                            
-                            # Get active chip
-                            if 'active_chip' in player_gw_json:
-                                active_chip = player_gw_json['active_chip']
+                    # Get player history
+                    player_json = self.get_player_history(entry_id)
+                    if not player_json or 'current' not in player_json:
+                        print(f"⚠️  Warning: No data for player {player_name}")
+                        failed_players += 1
+                        continue
                     
-                except Exception as e:
-                    print(f"⚠️ Warning: Could not get picks for {player_name}: {e}")
-                
-                # Transform DataFrame to single row (your original logic)
-                dfplayer.index = dfplayer.index + 1
-                dfplayer_out = dfplayer.stack()
-                dfplayer_out.index = dfplayer_out.index.map('{0[1]}_{0[0]}'.format)
-                dfplayer = dfplayer_out.to_frame().T
-                
-                # Add player info
-                dfplayer.insert(0, 'Player Name', dfleague.player_name[j], True)
-                dfplayer.insert(1, 'Team Name', dfleague.entry_name[j], True)
-                dfplayer.insert(2, 'Player Entry', dfleague.entry[j], True)
-                dfplayer.insert(3, 'Player Points', dfleague.total[j], True)
-                
-                # Add captain, vice-captain, and active chip info
-                dfplayer['Captain'] = captain_name
-                dfplayer['Vice-captain'] = vice_captain_name
-                dfplayer['Active chip'] = active_chip
-                dfplayer['league_id'] = league_id
-                dfplayer['gameweek'] = current_gw
-                
-                # Update results DataFrame
-                dfresults = pd.concat([dfresults, dfplayer], ignore_index=True)
-                
-                # Process chips used
-                if 'chips' in player_json:
-                    dfplayerchips = pd.DataFrame.from_records(player_json['chips'])
-                    if not dfplayerchips.empty:
-                        dfplayerchips.insert(0, 'Player Name', dfleague.player_name[j], True)
-                        dfplayerchips.insert(1, 'Player Points', dfleague.total[j], True)
-                        dfplayerchips['league_id'] = league_id
-                        dfplayerchips['entry_id'] = entry_id
+                    # Process current season data
+                    dfplayer = pd.DataFrame.from_records(player_json['current'])
+                    if dfplayer.empty:
+                        failed_players += 1
+                        continue
+                    
+                    # Calculate points net
+                    points_net = dfplayer['points'] - dfplayer['event_transfers_cost']
+                    dfplayer.insert(2, 'pointsnet', points_net, True)
+                    dfplayer['value'] = dfplayer['value'] / 10
+                    
+                    # Get captain & vice-captain with IDs
+                    captain_id = None
+                    vice_captain_id = None
+                    captain_name = "Unknown"
+                    vice_captain_name = "Unknown"
+                    active_chip = None
+                    
+                    try:
+                        player_gw_json = self.get_player_gameweek_picks(entry_id, current_gw)
+                        if player_gw_json and 'picks' in player_gw_json:
+                            dfplayergw = pd.DataFrame.from_records(player_gw_json['picks'])
+                            
+                            if not dfplayergw.empty:
+                                captain_picks = dfplayergw[dfplayergw.is_captain == True]
+                                vice_captain_picks = dfplayergw[dfplayergw.is_vice_captain == True]
+                                
+                                if not captain_picks.empty:
+                                    captain_id = int(captain_picks.element.iloc[0])
+                                    if not dffootballers.empty:
+                                        captain_row = dffootballers[dffootballers.id == captain_id]
+                                        if not captain_row.empty:
+                                            captain_name = captain_row.web_name.item()
+                                
+                                if not vice_captain_picks.empty:
+                                    vice_captain_id = int(vice_captain_picks.element.iloc[0])
+                                    if not dffootballers.empty:
+                                        vice_captain_row = dffootballers[dffootballers.id == vice_captain_id]
+                                        if not vice_captain_row.empty:
+                                            vice_captain_name = vice_captain_row.web_name.item()
+                                
+                                if 'active_chip' in player_gw_json:
+                                    active_chip = player_gw_json['active_chip']
                         
-                        # Update chips DataFrame
-                        dfresultschips = pd.concat([dfresultschips, dfplayerchips], ignore_index=True)
-                
-                # Small delay to be nice to FPL API
-                time.sleep(0.1)
-                
-            except Exception as e:
-                print(f"❌ Error processing player {player_name}: {e}")
-                continue
-        
-        # Store in database
-        if store_in_db and not dfresults.empty:
-            print("💾 Storing gameweek data in Supabase...")
-            success = fpl_db.store_gameweek_data(dfresults)
-            print(f"📊 Gameweek data stored: {'✅' if success else '❌'}")
+                    except Exception as picks_error:
+                        print(f"⚠️  Warning: Could not get picks for {player_name}: {picks_error}")
+                    
+                    # Transform DataFrame to single row
+                    dfplayer.index = dfplayer.index + 1
+                    dfplayer_out = dfplayer.stack()
+                    dfplayer_out.index = dfplayer_out.index.map('{0[1]}_{0[0]}'.format)
+                    dfplayer = dfplayer_out.to_frame().T
+                    
+                    # Add player info
+                    dfplayer.insert(0, 'Player Name', dfleague.player_name[j], True)
+                    dfplayer.insert(1, 'Team Name', dfleague.entry_name[j], True)
+                    dfplayer.insert(2, 'Player Entry', dfleague.entry[j], True)
+                    dfplayer.insert(3, 'Player Points', dfleague.total[j], True)
+                    
+                    # Add captain info with IDs
+                    dfplayer['Captain'] = captain_name
+                    dfplayer['Vice-captain'] = vice_captain_name
+                    dfplayer['captain_id'] = captain_id
+                    dfplayer['vice_captain_id'] = vice_captain_id
+                    dfplayer['Active chip'] = active_chip
+                    dfplayer['league_id'] = league_id
+                    dfplayer['gameweek'] = current_gw
+                    
+                    # Update results DataFrame
+                    dfresults = pd.concat([dfresults, dfplayer], ignore_index=True)
+                    successful_players += 1
+                    
+                    # Process chips
+                    if 'chips' in player_json:
+                        dfplayerchips = pd.DataFrame.from_records(player_json['chips'])
+                        if not dfplayerchips.empty:
+                            dfplayerchips.insert(0, 'Player Name', dfleague.player_name[j], True)
+                            dfplayerchips.insert(1, 'Player Points', dfleague.total[j], True)
+                            dfplayerchips['league_id'] = league_id
+                            dfplayerchips['entry_id'] = entry_id
+                            
+                            dfresultschips = pd.concat([dfresultschips, dfplayerchips], ignore_index=True)
+                    
+                    # Rate limiting
+                    time.sleep(0.1)
+                    
+                except Exception as player_error:
+                    print(f"❌ Error processing player {player_name}: {player_error}")
+                    failed_players += 1
+                    continue
             
-            # Store chip data
-            if not dfresultschips.empty:
-                chip_success = fpl_db.store_chip_usage(dfresultschips)
-                print(f"🎯 Chip data stored: {'✅' if chip_success else '❌'}")
-        
-        print(f"🎉 Processing complete! Processed {len(dfresults)} player records")
-        return dfresults, dfresultschips
+            print(f"Player processing complete: ✅ {successful_players} success, ❌ {failed_players} failed")
+            
+            # Step 9: Store gameweek data ONLY AFTER all players are confirmed in global_players
+            if store_in_db and not dfresults.empty:
+                print(f"🔄 Storing {len(dfresults)} gameweek records...")
+                gameweek_success = fpl_db.store_gameweek_data_normalized(dfresults)
+                print(f"Gameweek data stored: {'✅' if gameweek_success else '❌'}")
+                
+                if not dfresultschips.empty:
+                    print(f"🔄 Storing {len(dfresultschips)} chip records...")
+                    chip_success = fpl_db.store_chip_usage_normalized(dfresultschips)
+                    print(f"Chip data stored: {'✅' if chip_success else '❌'}")
+            
+            print(f"✅ Processing complete! Processed {len(dfresults)} player records")
+            return dfresults, dfresultschips
+            
+        except Exception as e:
+            print(f"❌ CRITICAL ERROR in process_league_data_normalized for league {league_id}: {e}")
+            import traceback
+            print(f"Full traceback: {traceback.format_exc()}")
+            return dfresults, dfresultschips
     
-    def get_league_standings_from_db(self, league_id: int, gameweek: Optional[int] = None) -> Dict:
-        """Get league standings from Supabase (lightning fast!)"""
+    # ... (rest of the methods remain the same as in the original file)
+    
+    def get_league_standings_from_db_normalized(self, league_id: int, gameweek: Optional[int] = None) -> Dict:
+        """Get league standings from normalized database using scalable approach"""
         try:
-            df = fpl_db.get_league_standings(league_id, gameweek)
+            df = fpl_db.get_league_standings_normalized(league_id, gameweek)
             if df.empty:
                 return {"standings": [], "message": "No data found - try running data collection first"}
             
             standings = []
+            
             for _, row in df.iterrows():
+                # Handle the data structure from database function or direct query
+                if isinstance(row.get('global_players'), list) and len(row['global_players']) > 0:
+                    player_name = row['global_players'][0].get('player_name', 'Unknown Player')
+                else:
+                    player_name = str(row.get('player_name', 'Unknown Player'))
+                
+                if isinstance(row.get('league_memberships'), list) and len(row['league_memberships']) > 0:
+                    team_name = row['league_memberships'][0].get('team_name', 'Unknown Team')  
+                else:
+                    team_name = str(row.get('team_name', 'Unknown Team'))
+                
                 standings.append({
-                    "position": row.get('position', 0),
-                    "entry_id": row.get('entry_id'),
-                    "player_name": row.get('player_name', 'Unknown'),
-                    "team_name": row.get('team_name', 'Unknown Team'),
-                    "total_points": row.get('total_points', 0),
-                    "gameweek_points": row.get('points', 0),
-                    "captain": row.get('captain'),
-                    "vice_captain": row.get('vice_captain'),
-                    "active_chip": row.get('active_chip'),
-                    "gameweek": row.get('gameweek', 0),
-                    "transfers_cost": row.get('transfers_cost', 0),
-                    "points_on_bench": row.get('points_on_bench', 0)
+                    "position": int(row.get('league_position', len(standings) + 1)),
+                    "entry_id": int(row.get('entry_id', 0)),
+                    "player_name": player_name,
+                    "team_name": team_name,
+                    "total_points": int(row.get('total_points', 0)),
+                    "gameweek_points": int(row.get('points', 0)),
+                    "captain": str(row.get('captain_name', '')) if row.get('captain_name') else 'No Captain',
+                    "vice_captain": str(row.get('vice_captain_name', '')) if row.get('vice_captain_name') else 'No Vice Captain',
+                    "active_chip": str(row.get('active_chip', '')) if row.get('active_chip') else None,
+                    "gameweek": int(row.get('gameweek', 0)),
+                    "transfers_cost": int(row.get('transfers_cost', 0)),
+                    "points_on_bench": int(row.get('points_on_bench', 0))
                 })
+            
+            # Ensure proper sorting by total_points
+            standings.sort(key=lambda x: x['total_points'], reverse=True)
+            
+            # Update positions after sorting
+            for i, standing in enumerate(standings):
+                standing['position'] = i + 1
             
             return {
                 "league_id": league_id,
@@ -261,271 +349,147 @@ class FPLService:
             }
             
         except Exception as e:
-            print(f"Error getting league standings from DB: {e}")
+            print(f"Error getting normalized league standings: {e}")
+            import traceback
+            print(f"Full traceback: {traceback.format_exc()}")
             return {"error": str(e), "standings": []}
     
-    def get_player_trends_from_db(self, entry_id: int) -> Dict:
-        """Get player performance trends over time"""
+    def get_captain_analysis_from_db_normalized(self, league_id: int) -> Dict:
+        """Get captain analysis using database function - scalable approach"""
         try:
-            df = fpl_db.get_player_trends(entry_id)
+            df = fpl_db.get_captain_analysis_normalized(league_id)
+            
             if df.empty:
-                return {"trends": [], "message": "No data found for this player"}
+                return {"analysis": [], "message": "No captain data found"}
             
-            trends = []
-            for _, row in df.iterrows():
-                trends.append({
-                    "gameweek": row.get('gameweek'),
-                    "points": row.get('points', 0),
-                    "total_points": row.get('total_points', 0),
-                    "overall_rank": row.get('overall_rank'),
-                    "previous_rank": row.get('previous_rank'),
-                    "rank_change": (row.get('previous_rank', 0) - row.get('overall_rank', 0)) if row.get('previous_rank') else 0,
-                    "captain": row.get('captain'),
-                    "transfers_cost": row.get('transfers_cost', 0),
-                    "team_value": row.get('team_value', 0) / 10,  # Convert back to millions
-                    "active_chip": row.get('active_chip')
-                })
-            
-            return {
-                "entry_id": entry_id,
-                "player_name": df.iloc[0].get('player_name', 'Unknown'),
-                "total_gameweeks": len(trends),
-                "trends": trends
-            }
-            
-        except Exception as e:
-            print(f"Error getting player trends: {e}")
-            return {"error": str(e), "trends": []}
-    
-    # REPLACE the get_captain_analysis_from_db function in fpl_service.py with this simpler version:
-
-    def get_captain_analysis_from_db(self, league_id: int) -> Dict:
-        """Get captain choices analysis - SIMPLE & ROBUST VERSION"""
-        try:
-            # Step 1: Get all gameweek data for this league
-            print(f"🔍 Getting data for league {league_id}...")
-            
-            gameweek_response = fpl_db.client.table('gameweek_data')\
-                .select('*')\
-                .eq('league_id', league_id)\
-                .execute()
-            
-            if not gameweek_response.data:
-                return {"analysis": [], "message": "No gameweek data found"}
-            
-            print(f"📊 Found {len(gameweek_response.data)} gameweek records")
-            
-            # Step 2: Get player names
-            players_response = fpl_db.client.table('league_players')\
-                .select('*')\
-                .eq('league_id', league_id)\
-                .execute()
-            
-            # Create a lookup dict for player names
-            player_lookup = {}
-            if players_response.data:
-                for player in players_response.data:
-                    player_lookup[player['entry_id']] = {
-                        'player_name': player['player_name'],
-                        'team_name': player['team_name']
-                    }
-            
-            print(f"👥 Found {len(player_lookup)} players")
-            
-            # Step 3: Process the data
-            fpl_managers_data = []
-            captain_stats = {}
-            
-            for record in gameweek_response.data:
-                entry_id = record.get('entry_id')
-                captain = record.get('captain', '').strip()
-                vice_captain = record.get('vice_captain', '').strip()
-                
-                # Get player info
-                player_info = player_lookup.get(entry_id, {
-                    'player_name': 'Unknown Player',
-                    'team_name': 'Unknown Team'
-                })
-                
-                # Add to FPL managers data
-                manager_record = {
-                    "fpl_manager": player_info['player_name'],
-                    "team_name": player_info['team_name'],
-                    "entry_id": entry_id,
-                    "gameweek": record.get('gameweek', 0),
-                    "total_points": record.get('total_points', 0),
-                    "gameweek_points": record.get('points', 0),
-                    "captain": captain if captain and captain != 'Unknown' else 'No Captain',
-                    "vice_captain": vice_captain if vice_captain and vice_captain != 'Unknown' else 'No Vice-Captain',
-                    "transfers_cost": record.get('transfers_cost', 0),
-                    "team_value": round(record.get('team_value', 0) / 10, 1) if record.get('team_value') else 0,
-                    "active_chip": record.get('active_chip'),
-                    "points_on_bench": record.get('points_on_bench', 0)
-                }
-                
-                fpl_managers_data.append(manager_record)
-                
-                # Count captain stats (only for valid captains)
-                if captain and captain != 'Unknown' and captain.strip():
-                    if captain not in captain_stats:
-                        captain_stats[captain] = {
-                            'times_captained': 0,
-                            'total_points': 0,
-                            'points_list': []
-                        }
-                    
-                    captain_stats[captain]['times_captained'] += 1
-                    captain_stats[captain]['total_points'] += record.get('points', 0)
-                    captain_stats[captain]['points_list'].append(record.get('points', 0))
-            
-            # Step 4: Process captain statistics
+            # Convert DataFrame to the expected format
             captain_analysis = []
-            for captain_name, stats in captain_stats.items():
-                if stats['times_captained'] > 0:
-                    captain_analysis.append({
-                        "player_name": captain_name,
-                        "times_captained": stats['times_captained'],
-                        "total_points": stats['total_points'],
-                        "average_points": round(stats['total_points'] / stats['times_captained'], 1),
-                        "best_performance": max(stats['points_list']) if stats['points_list'] else 0,
-                        "worst_performance": min(stats['points_list']) if stats['points_list'] else 0
-                    })
+            for _, row in df.iterrows():
+                captain_analysis.append({
+                    "player_id": int(row.get('captain_id', 0)),
+                    "player_name": str(row.get('captain_name', 'Unknown')),
+                    "times_captained": int(row.get('times_captained', 0)),
+                    "total_points": int(row.get('total_points', 0)),
+                    "average_points": float(row.get('average_points', 0.0)),
+                    "best_performance": int(row.get('best_performance', 0)),
+                    "worst_performance": int(row.get('worst_performance', 0))
+                })
             
-            # Sort captain analysis by total points
-            captain_analysis.sort(key=lambda x: x['total_points'], reverse=True)
-            
-            # Sort FPL managers by total points
-            fpl_managers_data.sort(key=lambda x: x['total_points'], reverse=True)
-            
-            # Step 5: Get latest gameweek summary
-            if fpl_managers_data:
-                latest_gw = max(record['gameweek'] for record in fpl_managers_data)
+            # Get additional data for full analysis
+            try:
+                # Get all gameweek data for manager information
+                response = fpl_db.client.table('gameweek_data_new')\
+                    .select('''
+                        entry_id,
+                        gameweek,
+                        points,
+                        total_points,
+                        captain_name,
+                        vice_captain_name,
+                        active_chip,
+                        transfers_cost,
+                        team_value,
+                        points_on_bench,
+                        global_players(player_name),
+                        league_memberships(team_name)
+                    ''')\
+                    .eq('league_id', league_id)\
+                    .execute()
+                
+                fpl_managers_data = []
+                if response.data:
+                    for record in response.data:
+                        # Handle nested data
+                        player_info = record.get('global_players', [])
+                        membership_info = record.get('league_memberships', [])
+                        
+                        player_name = player_info[0].get('player_name', 'Unknown') if player_info else 'Unknown'
+                        team_name = membership_info[0].get('team_name', 'Unknown') if membership_info else 'Unknown'
+                        
+                        fpl_managers_data.append({
+                            "fpl_manager": player_name,
+                            "team_name": team_name,
+                            "entry_id": record.get('entry_id'),
+                            "gameweek": record.get('gameweek', 0),
+                            "total_points": record.get('total_points', 0),
+                            "gameweek_points": record.get('points', 0),
+                            "captain": record.get('captain_name') or 'No Captain',
+                            "vice_captain": record.get('vice_captain_name') or 'No Vice Captain',
+                            "transfers_cost": record.get('transfers_cost', 0),
+                            "team_value": round(record.get('team_value', 0) / 10, 1) if record.get('team_value') else 0,
+                            "active_chip": record.get('active_chip'),
+                            "points_on_bench": record.get('points_on_bench', 0)
+                        })
+                
+                # Sort data
+                captain_analysis.sort(key=lambda x: x['total_points'], reverse=True)
+                fpl_managers_data.sort(key=lambda x: x['total_points'], reverse=True)
+                
+                # Get latest gameweek data
+                latest_gw = max((record['gameweek'] for record in fpl_managers_data), default=0)
                 latest_gw_data = [record for record in fpl_managers_data if record['gameweek'] == latest_gw]
                 latest_gw_data.sort(key=lambda x: x['gameweek_points'], reverse=True)
-            else:
+                
+            except Exception as manager_error:
+                print(f"Error getting manager data: {manager_error}")
+                fpl_managers_data = []
                 latest_gw = 0
                 latest_gw_data = []
-            
-            print(f"✅ Analysis complete - {len(fpl_managers_data)} total records, {len(captain_analysis)} unique captains")
             
             return {
                 "league_id": league_id,
                 "latest_gameweek": latest_gw,
                 "total_records": len(fpl_managers_data),
                 "total_unique_captains": len(captain_analysis),
-                
-                # All FPL managers with their details (what you requested!)
                 "fpl_managers_data": fpl_managers_data,
-                
-                # Captain performance analysis
                 "captain_performance": captain_analysis,
-                
-                # Latest gameweek captain choices
                 "latest_gameweek_captains": latest_gw_data,
-                
-                # Quick summary stats
                 "summary": {
                     "most_popular_captain": captain_analysis[0]["player_name"] if captain_analysis else "None",
-                    "best_captain_average": captain_analysis[0]["average_points"] if captain_analysis else 0,
-                    "total_managers": len(set(record['entry_id'] for record in fpl_managers_data)),
-                    "total_gameweeks": len(set(record['gameweek'] for record in fpl_managers_data))
+                    "highest_scoring_captain": max(captain_analysis, key=lambda x: x["average_points"])["player_name"] if captain_analysis else "None"
                 }
             }
             
         except Exception as e:
-            print(f"❌ Error in captain analysis: {e}")
-            import traceback
-            print(f"📝 Full error: {traceback.format_exc()}")
-            return {
-                "error": str(e), 
-                "analysis": [],
-                "message": "Internal error occurred - check server logs"
-            }
+            print(f"Error getting normalized captain analysis: {e}")
+            import traceback  
+            print(f"Full traceback: {traceback.format_exc()}")
+            return {"error": str(e), "analysis": []}
     
-    def get_league_summary_from_db(self, league_id: int) -> Dict:
-        """Get comprehensive league summary with all stats"""
+    def get_player_cross_league_analysis(self, entry_id: int) -> Dict:
+        """Get player's performance across all leagues"""
         try:
-            summary = fpl_db.get_league_summary(league_id)
+            df = fpl_db.get_player_cross_league_stats(entry_id)
+            if df.empty:
+                return {"leagues": [], "message": "No data found for this player"}
             
-            if not summary:
-                return {"error": "League not found", "league_id": league_id}
-            
-            # Add captain analysis and chip usage
-            captain_analysis = self.get_captain_analysis_from_db(league_id)
-            
-            # Get chip usage
-            chips_df = fpl_db.get_chip_usage_summary(league_id)
-            chip_summary = {}
-            if not chips_df.empty:
-                chip_counts = chips_df['chip_name'].value_counts().to_dict()
-                chip_summary = {
-                    "total_chips_used": len(chips_df),
-                    "chip_breakdown": chip_counts,
-                    "players_used_chips": chips_df['entry_id'].nunique()
-                }
+            leagues_data = []
+            for league_id in df['league_id'].unique():
+                league_data = df[df['league_id'] == league_id]
+                league_info = league_data.iloc[0].get('leagues', {})
+                
+                if isinstance(league_info, list) and len(league_info) > 0:
+                    league_info = league_info[0]
+                
+                leagues_data.append({
+                    "league_id": league_id,
+                    "league_name": league_info.get('name', f'League {league_id}'),
+                    "total_gameweeks": len(league_data),
+                    "best_gameweek": league_data['points'].max(),
+                    "average_points": round(league_data['points'].mean(), 1),
+                    "total_points": league_data['total_points'].iloc[-1] if not league_data.empty else 0
+                })
             
             return {
-                **summary,
-                "captain_analysis": captain_analysis.get('analysis', [])[:5],  # Top 5 captains
-                "chip_usage": chip_summary
+                "entry_id": entry_id,
+                "player_name": df.iloc[0].get('global_players', {}).get('player_name', 'Unknown'),
+                "total_leagues": len(leagues_data),
+                "leagues": leagues_data
             }
             
         except Exception as e:
-            print(f"Error getting league summary: {e}")
-            return {"error": str(e), "league_id": league_id}
-        
-
-    # Also add this DEBUG function to your fpl_service.py
-    def debug_captain_data(self, league_id: int) -> Dict:
-        """Debug function to see what captain data exists"""
-        try:
-            # Get all gameweek data for this league
-            response = fpl_db.client.table('gameweek_data')\
-                .select('captain, vice_captain, points, gameweek, entry_id')\
-                .eq('league_id', league_id)\
-                .execute()
-            
-            df = pd.DataFrame(response.data) if response.data else pd.DataFrame()
-            
-            if df.empty:
-                return {"error": "No gameweek data found at all"}
-            
-            # Analyze captain data
-            captain_info = {
-                "total_records": len(df),
-                "records_with_captain": len(df[df['captain'].notna()]),
-                "unique_captains": df['captain'].nunique(),
-                "sample_captains": df['captain'].value_counts().head(10).to_dict(),
-                "null_captains": len(df[df['captain'].isnull()]),
-                "empty_captains": len(df[df['captain'] == '']),
-                "unknown_captains": len(df[df['captain'] == 'Unknown']),
-                "sample_data": df[['captain', 'vice_captain', 'points', 'gameweek']].head(5).to_dict('records')
-            }
-            
-            return captain_info
-            
-        except Exception as e:
-            return {"error": str(e)}
+            print(f"Error getting cross-league analysis: {e}")
+            return {"error": str(e), "leagues": []}
 
 # Initialize FPL service
 fpl_service = FPLService()
-
-# Example usage
-if __name__ == "__main__":
-    # Test with your league ID
-    league_id = 646571
-    
-    # Process fresh data from FPL API
-    print("Processing fresh FPL data...")
-    df_gameweek, df_chips = fpl_service.process_league_data(league_id)
-    
-    # Get processed data from database
-    print("\nGetting data from Supabase...")
-    standings = fpl_service.get_league_standings_from_db(league_id)
-    print(f"Found {len(standings.get('standings', []))} players in standings")
-    
-    # Get league summary
-    summary = fpl_service.get_league_summary_from_db(league_id)
-    print(f"League: {summary.get('league_info', {}).get('name', 'Unknown')}")
-    print(f"Players: {summary.get('total_players', 0)}")
-    print(f"Latest GW: {summary.get('latest_gameweek', 0)}")

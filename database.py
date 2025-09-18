@@ -317,7 +317,7 @@ class FPLDatabase:
             return False
 
     def store_gameweek_data_normalized(self, gameweek_df: pd.DataFrame) -> bool:
-        """Store gameweek data using normalized schema - SCHEMA ALIGNED"""
+        """Store gameweek data using normalized schema - FIXED TO USE CURRENT GAMEWEEK"""
         try:
             gameweek_data = []
             current_time = datetime.now().isoformat()
@@ -338,7 +338,7 @@ class FPLDatabase:
                 return str(value) if value != '' else default
             
             for _, row in gameweek_df.iterrows():
-                gameweek = safe_int(row.get('gameweek', 1), 1)
+                current_gameweek = safe_int(row.get('gameweek', 1), 1)
                 
                 # Handle active_chip
                 active_chip = row.get('Active chip')
@@ -350,25 +350,27 @@ class FPLDatabase:
                 captain_id = safe_int(row.get('captain_id')) if row.get('captain_id') is not None else None
                 vice_captain_id = safe_int(row.get('vice_captain_id')) if row.get('vice_captain_id') is not None else None
                 
+                # ✅ FIXED: Use current gameweek number instead of hardcoded _1
+                gameweek_suffix = f"_{current_gameweek}"
+                
                 gameweek_record = {
                     'league_id': safe_int(row.get('league_id')),
                     'entry_id': safe_int(row.get('Player Entry')),
-                    'gameweek': gameweek,
-                    'points': safe_int(row.get('points_1')),
+                    'gameweek': current_gameweek,
+                    'points': safe_int(row.get(f'points{gameweek_suffix}')),  # ✅ Dynamic gameweek
                     'total_points': safe_int(row.get('Player Points')),
-                    'points_net': safe_int(row.get('pointsnet_1')),
-                    'bank': safe_int(row.get('bank_1')),
-                    'team_value': safe_int(row.get('value_1', 0) * 10 if row.get('value_1') is not None else 0),
-                    'transfers': safe_int(row.get('event_transfers_1')),
-                    'transfers_cost': safe_int(row.get('event_transfers_cost_1')),
-                    'points_on_bench': safe_int(row.get('points_on_bench_1')),
+                    'points_net': safe_int(row.get(f'pointsnet{gameweek_suffix}')),
+                    'bank': safe_int(row.get(f'bank{gameweek_suffix}')),
+                    'team_value': safe_int(row.get(f'value{gameweek_suffix}', 0) * 10 if row.get(f'value{gameweek_suffix}') is not None else 0),
+                    'transfers': safe_int(row.get(f'event_transfers{gameweek_suffix}')),
+                    'transfers_cost': safe_int(row.get(f'event_transfers_cost{gameweek_suffix}')),
+                    'points_on_bench': safe_int(row.get(f'points_on_bench{gameweek_suffix}')),  # ✅ Dynamic gameweek
                     'captain_id': captain_id,
                     'captain_name': safe_str(row.get('Captain')),
                     'vice_captain_id': vice_captain_id,
                     'vice_captain_name': safe_str(row.get('Vice-captain')),
                     'active_chip': active_chip,
-                    'updated_at': current_time  # gameweek_data_new table has updated_at
-                    # created_at will be set by DEFAULT now()
+                    'updated_at': current_time
                 }
                 
                 if gameweek_record['entry_id'] and gameweek_record['league_id']:
@@ -384,7 +386,7 @@ class FPLDatabase:
             # Upsert to normalized table
             result = self.client.table('gameweek_data_new').upsert(
                 gameweek_data,
-                on_conflict='league_id,entry_id,gameweek'  # Matches the unique constraint
+                on_conflict='league_id,entry_id,gameweek'
             ).execute()
             
             print(f"Successfully stored {len(result.data)} records")
@@ -428,87 +430,161 @@ class FPLDatabase:
             print(f"Error storing normalized chip usage: {e}")
             traceback.print_exc()
             return False
+    
+    def get_smart_gameweek_for_standings(self, league_id: int, requested_gameweek: Optional[int] = None) -> int:
+        """
+        Determine which gameweek to use for standings based on data availability
+        Returns the gameweek that has the most recent meaningful data
+        """
+        try:
+            if requested_gameweek:
+                return requested_gameweek
+            
+            current_gw = self.get_current_gameweek() or 1
+            
+            # Check if current gameweek has meaningful data (non-zero points)
+            response = self.client.table('gameweek_data_new')\
+                .select('points, gameweek')\
+                .eq('league_id', league_id)\
+                .eq('gameweek', current_gw)\
+                .gt('points', 0)\
+                .limit(1)\
+                .execute()
+            
+            # If current gameweek has data with points > 0, use it
+            if response.data:
+                print(f"Using current gameweek {current_gw} (has active data)")
+                return current_gw
+            
+            # Otherwise, check previous gameweek
+            previous_gw = max(1, current_gw - 1)
+            previous_response = self.client.table('gameweek_data_new')\
+                .select('points, gameweek')\
+                .eq('league_id', league_id)\
+                .eq('gameweek', previous_gw)\
+                .limit(1)\
+                .execute()
+            
+            if previous_response.data:
+                print(f"Using previous gameweek {previous_gw} (current gameweek {current_gw} not started)")
+                return previous_gw
+            
+            print(f"Using current gameweek {current_gw} (fallback)")
+            return current_gw
+            
+        except Exception as e:
+            print(f"Error determining smart gameweek: {e}")
+            return self.get_current_gameweek() or 1
 
     def get_league_standings_normalized(self, league_id: int, gameweek: Optional[int] = None) -> pd.DataFrame:
-        """Get league standings using normalized schema with proper relationships"""
+        """Get league standings using smart gameweek selection"""
         try:
-            # Build the query
-            if gameweek:
-                response = self.client.table('gameweek_data_new')\
-                    .select('''
-                        entry_id,
-                        gameweek,
-                        points,
-                        total_points,
-                        captain_name,
-                        vice_captain_name,
-                        active_chip,
-                        transfers_cost,
-                        points_on_bench,
-                        team_value,
-                        global_players(player_name),
-                        league_memberships(team_name)
-                    ''')\
-                    .eq('league_id', league_id)\
-                    .eq('gameweek', gameweek)\
-                    .order('total_points', desc=True)\
-                    .execute()
-            else:
-                # Get current gameweek
-                current_gw = self.get_current_gameweek() or 1
-                
-                response = self.client.table('gameweek_data_new')\
-                    .select('''
-                        entry_id,
-                        gameweek,
-                        points,
-                        total_points,
-                        captain_name,
-                        vice_captain_name,
-                        active_chip,
-                        transfers_cost,
-                        points_on_bench,
-                        team_value,
-                        global_players(player_name),
-                        league_memberships(team_name)
-                    ''')\
-                    .eq('league_id', league_id)\
-                    .eq('gameweek', current_gw)\
-                    .order('total_points', desc=True)\
-                    .execute()
+            # Use smart gameweek selection
+            target_gameweek = self.get_smart_gameweek_for_standings(league_id, gameweek)
+            
+            response = self.client.table('league_standings_view')\
+                .select('*')\
+                .eq('league_id', league_id)\
+                .eq('gameweek', target_gameweek)\
+                .order('total_points', desc=True)\
+                .execute()
             
             if response.data:
                 df = pd.DataFrame(response.data)
-                
-                # Add league_position
                 df = df.sort_values('total_points', ascending=False).reset_index(drop=True)
                 df['league_position'] = df.index + 1
-                
+                df['selected_gameweek'] = target_gameweek  # Add this for reference
                 return df
             
             return pd.DataFrame()
             
         except Exception as e:
-            print(f"Error getting normalized league standings: {e}")
-            traceback.print_exc()
+            print(f"Error getting league standings from view: {e}")
+            return self._get_standings_fallback(league_id, gameweek)
+
+    def _get_standings_fallback(self, league_id: int, gameweek: Optional[int] = None) -> pd.DataFrame:
+        """Fallback method with smart gameweek selection"""
+        try:
+            # Use smart gameweek selection in fallback too
+            target_gameweek = self.get_smart_gameweek_for_standings(league_id, gameweek)
+            
+            # Get gameweek data for the smart-selected gameweek
+            gw_response = self.client.table('gameweek_data_new')\
+                .select('*')\
+                .eq('league_id', league_id)\
+                .eq('gameweek', target_gameweek)\
+                .execute()
+            
+            if not gw_response.data:
+                return pd.DataFrame()
+            
+            # Rest of the fallback logic remains the same...
+            entry_ids = [row['entry_id'] for row in gw_response.data]
+            players_response = self.client.table('global_players')\
+                .select('entry_id, player_name')\
+                .in_('entry_id', entry_ids)\
+                .execute()
+            
+            memberships_response = self.client.table('league_memberships')\
+                .select('entry_id, team_name')\
+                .eq('league_id', league_id)\
+                .in_('entry_id', entry_ids)\
+                .execute()
+            
+            player_names = {p['entry_id']: p['player_name'] for p in players_response.data}
+            team_names = {m['entry_id']: m['team_name'] for m in memberships_response.data}
+            
+            combined_data = []
+            for row in gw_response.data:
+                entry_id = row['entry_id']
+                combined_row = {
+                    **row,
+                    'player_name': player_names.get(entry_id, 'Unknown Player'),
+                    'team_name': team_names.get(entry_id, 'Unknown Team'),
+                    'selected_gameweek': target_gameweek
+                }
+                combined_data.append(combined_row)
+            
+            df = pd.DataFrame(combined_data)
+            df = df.sort_values('total_points', ascending=False).reset_index(drop=True)
+            df['league_position'] = df.index + 1
+            return df
+            
+        except Exception as e:
+            print(f"Fallback query also failed: {e}")
             return pd.DataFrame()
 
     def get_captain_analysis_normalized(self, league_id: int) -> pd.DataFrame:
-        """Get captain analysis using normalized schema"""
+        """Get captain analysis using database view - SCALABLE APPROACH"""
+        try:
+            response = self.client.table('captain_analysis_view')\
+                .select('*')\
+                .eq('league_id', league_id)\
+                .order('total_points', desc=True)\
+                .execute()
+            
+            if response.data:
+                return pd.DataFrame(response.data)
+            
+            return pd.DataFrame()
+            
+        except Exception as e:
+            print(f"Error getting captain analysis from view: {e}")
+            # FALLBACK: Use simple aggregation query
+            return self._get_captain_analysis_fallback(league_id)
+        
+    def _get_captain_analysis_fallback(self, league_id: int) -> pd.DataFrame:
+        """Fallback captain analysis using application-level aggregation"""
         try:
             response = self.client.table('gameweek_data_new')\
-                .select('''
-                    captain_id,
-                    captain_name,
-                    points
-                ''')\
+                .select('captain_id, captain_name, points')\
                 .eq('league_id', league_id)\
                 .not_.is_('captain_id', 'null')\
                 .not_.is_('captain_name', 'null')\
                 .execute()
             
             if response.data:
-                # Process manually for aggregation
+                # Process manually for aggregation (same as before)
                 captain_stats = {}
                 for record in response.data:
                     captain_name = record['captain_name']
@@ -544,7 +620,7 @@ class FPLDatabase:
             return pd.DataFrame()
             
         except Exception as e:
-            print(f"Error getting normalized captain analysis: {e}")
+            print(f"Captain analysis fallback failed: {e}")
             return pd.DataFrame()
 
     def get_player_cross_league_stats(self, entry_id: int) -> pd.DataFrame:
@@ -580,3 +656,6 @@ fpl_db = FPLDatabase()
 # Test connection on import
 if __name__ == "__main__":
     fpl_db.test_connection()
+
+# Test that the method exists
+print(f"Method exists: {hasattr(fpl_db, 'get_league_standings_normalized')}")

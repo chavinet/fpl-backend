@@ -298,51 +298,51 @@ class FPLService:
     # ... (rest of the methods remain the same as in the original file)
     
     def get_league_standings_from_db_normalized(self, league_id: int, gameweek: Optional[int] = None) -> Dict:
-        """Get league standings from normalized database using scalable approach"""
+        """Get league standings with smart gameweek selection - FIXED JSON SERIALIZATION"""
         try:
             df = fpl_db.get_league_standings_normalized(league_id, gameweek)
             if df.empty:
                 return {"standings": [], "message": "No data found - try running data collection first"}
             
+            # DEBUG: Print available columns
+            print(f"Available DataFrame columns: {list(df.columns)}")
+            if not df.empty:
+                print(f"Sample row data: {dict(df.iloc[0])}")
+            
             standings = []
+            selected_gameweek = df['selected_gameweek'].iloc[0] if 'selected_gameweek' in df.columns else gameweek
             
             for _, row in df.iterrows():
-                # Handle the data structure from database function or direct query
-                if isinstance(row.get('global_players'), list) and len(row['global_players']) > 0:
-                    player_name = row['global_players'][0].get('player_name', 'Unknown Player')
-                else:
-                    player_name = str(row.get('player_name', 'Unknown Player'))
+                player_name = str(row.get('player_name', 'Unknown Player'))
+                team_name = str(row.get('team_name', 'Unknown Team'))
                 
-                if isinstance(row.get('league_memberships'), list) and len(row['league_memberships']) > 0:
-                    team_name = row['league_memberships'][0].get('team_name', 'Unknown Team')  
-                else:
-                    team_name = str(row.get('team_name', 'Unknown Team'))
-                
+                # Debug
+                gameweek_pts = row.get('gameweek_points', 0)
+                print(f"Player {player_name}: gameweek_points = {gameweek_pts} (type: {type(gameweek_pts)})")
+
                 standings.append({
-                    "position": int(row.get('league_position', len(standings) + 1)),
-                    "entry_id": int(row.get('entry_id', 0)),
+                    "position": int(row.get('league_position', len(standings) + 1)) if pd.notna(row.get('league_position')) else len(standings) + 1,
+                    "entry_id": int(row.get('entry_id', 0)) if pd.notna(row.get('entry_id')) else 0,
                     "player_name": player_name,
                     "team_name": team_name,
-                    "total_points": int(row.get('total_points', 0)),
-                    "gameweek_points": int(row.get('points', 0)),
-                    "captain": str(row.get('captain_name', '')) if row.get('captain_name') else 'No Captain',
-                    "vice_captain": str(row.get('vice_captain_name', '')) if row.get('vice_captain_name') else 'No Vice Captain',
-                    "active_chip": str(row.get('active_chip', '')) if row.get('active_chip') else None,
-                    "gameweek": int(row.get('gameweek', 0)),
-                    "transfers_cost": int(row.get('transfers_cost', 0)),
-                    "points_on_bench": int(row.get('points_on_bench', 0))
+                    "total_points": int(row.get('total_points', 0)) if pd.notna(row.get('total_points')) else 0,
+                    "gameweek_points": int(row.get('gameweek_points', 0)) if pd.notna(row.get('gameweek_points')) else 0,  # FIXED: Changed from 'gameweek_points' to 'points'
+                    "captain": str(row.get('captain_name', '')) if pd.notna(row.get('captain_name')) and row.get('captain_name') else 'No Captain',
+                    "vice_captain": str(row.get('vice_captain_name', '')) if pd.notna(row.get('vice_captain_name')) and row.get('vice_captain_name') else 'No Vice Captain',
+                    "active_chip": str(row.get('active_chip', '')) if pd.notna(row.get('active_chip')) and row.get('active_chip') else None,
+                    "gameweek": int(selected_gameweek) if pd.notna(selected_gameweek) else 0,
+                    "transfers_cost": int(row.get('transfers_cost', 0)) if pd.notna(row.get('transfers_cost')) else 0,
+                    "points_on_bench": int(row.get('points_on_bench', 0)) if pd.notna(row.get('points_on_bench')) else 0
                 })
             
-            # Ensure proper sorting by total_points
+            # Sort by total_points and update positions
             standings.sort(key=lambda x: x['total_points'], reverse=True)
-            
-            # Update positions after sorting
             for i, standing in enumerate(standings):
                 standing['position'] = i + 1
             
             return {
-                "league_id": league_id,
-                "gameweek": gameweek or "latest",
+                "league_id": int(league_id),
+                "gameweek": int(selected_gameweek) if pd.notna(selected_gameweek) else "latest",
                 "total_players": len(standings),
                 "standings": standings,
                 "last_updated": datetime.now().isoformat()
@@ -351,7 +351,7 @@ class FPLService:
         except Exception as e:
             print(f"Error getting normalized league standings: {e}")
             import traceback
-            print(f"Full traceback: {traceback.format_exc()}")
+            traceback.print_exc()
             return {"error": str(e), "standings": []}
     
     def get_captain_analysis_from_db_normalized(self, league_id: int) -> Dict:

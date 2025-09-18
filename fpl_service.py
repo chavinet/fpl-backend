@@ -187,6 +187,9 @@ class FPLService:
                     if dfplayer.empty:
                         failed_players += 1
                         continue
+
+                    print(f"Available columns for player {player_name}: {list(dfplayer.columns)}")
+                    print(f"Sample row: {dfplayer.iloc[0] if not dfplayer.empty else 'No data'}")
                     
                     # Calculate points net
                     points_net = dfplayer['points'] - dfplayer['event_transfers_cost']
@@ -295,19 +298,17 @@ class FPLService:
             print(f"Full traceback: {traceback.format_exc()}")
             return dfresults, dfresultschips
     
-    # ... (rest of the methods remain the same as in the original file)
-    
     def get_league_standings_from_db_normalized(self, league_id: int, gameweek: Optional[int] = None) -> Dict:
-        """Get league standings with smart gameweek selection - FIXED JSON SERIALIZATION"""
+        """Get league standings with smart gameweek selection"""
         try:
             df = fpl_db.get_league_standings_normalized(league_id, gameweek)
             if df.empty:
                 return {"standings": [], "message": "No data found - try running data collection first"}
             
-            # DEBUG: Print available columns
-            print(f"Available DataFrame columns: {list(df.columns)}")
+            # DEBUG: See what's in the DataFrame
+            print(f"DataFrame columns: {list(df.columns)}")
             if not df.empty:
-                print(f"Sample row data: {dict(df.iloc[0])}")
+                print(f"Sample transfers data: transfers={df.iloc[0].get('transfers')}, transfers_cost={df.iloc[0].get('transfers_cost')}")
             
             standings = []
             selected_gameweek = df['selected_gameweek'].iloc[0] if 'selected_gameweek' in df.columns else gameweek
@@ -316,26 +317,22 @@ class FPLService:
                 player_name = str(row.get('player_name', 'Unknown Player'))
                 team_name = str(row.get('team_name', 'Unknown Team'))
                 
-                # Debug
-                gameweek_pts = row.get('gameweek_points', 0)
-                print(f"Player {player_name}: gameweek_points = {gameweek_pts} (type: {type(gameweek_pts)})")
-
                 standings.append({
                     "position": int(row.get('league_position', len(standings) + 1)) if pd.notna(row.get('league_position')) else len(standings) + 1,
                     "entry_id": int(row.get('entry_id', 0)) if pd.notna(row.get('entry_id')) else 0,
                     "player_name": player_name,
                     "team_name": team_name,
                     "total_points": int(row.get('total_points', 0)) if pd.notna(row.get('total_points')) else 0,
-                    "gameweek_points": int(row.get('gameweek_points', 0)) if pd.notna(row.get('gameweek_points')) else 0,  # FIXED: Changed from 'gameweek_points' to 'points'
+                    "gameweek_points": int(row.get('gameweek_points', 0)) if pd.notna(row.get('gameweek_points')) else 0,
+                    "transfers": int(row.get('transfers', 0)) if pd.notna(row.get('transfers')) else 0,  # THIS IS THE MISSING LINE
+                    "transfers_cost": int(row.get('transfers_cost', 0)) if pd.notna(row.get('transfers_cost')) else 0,
                     "captain": str(row.get('captain_name', '')) if pd.notna(row.get('captain_name')) and row.get('captain_name') else 'No Captain',
                     "vice_captain": str(row.get('vice_captain_name', '')) if pd.notna(row.get('vice_captain_name')) and row.get('vice_captain_name') else 'No Vice Captain',
                     "active_chip": str(row.get('active_chip', '')) if pd.notna(row.get('active_chip')) and row.get('active_chip') else None,
                     "gameweek": int(selected_gameweek) if pd.notna(selected_gameweek) else 0,
-                    "transfers_cost": int(row.get('transfers_cost', 0)) if pd.notna(row.get('transfers_cost')) else 0,
                     "points_on_bench": int(row.get('points_on_bench', 0)) if pd.notna(row.get('points_on_bench')) else 0
                 })
             
-            # Sort by total_points and update positions
             standings.sort(key=lambda x: x['total_points'], reverse=True)
             for i, standing in enumerate(standings):
                 standing['position'] = i + 1

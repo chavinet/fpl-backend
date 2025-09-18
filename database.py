@@ -317,7 +317,7 @@ class FPLDatabase:
             return False
 
     def store_gameweek_data_normalized(self, gameweek_df: pd.DataFrame) -> bool:
-        """Store gameweek data using normalized schema - FIXED TO USE CURRENT GAMEWEEK"""
+        """Store gameweek data using normalized schema - FIXED TRANSFER COUNT"""
         try:
             gameweek_data = []
             current_time = datetime.now().isoformat()
@@ -350,21 +350,25 @@ class FPLDatabase:
                 captain_id = safe_int(row.get('captain_id')) if row.get('captain_id') is not None else None
                 vice_captain_id = safe_int(row.get('vice_captain_id')) if row.get('vice_captain_id') is not None else None
                 
-                # ✅ FIXED: Use current gameweek number instead of hardcoded _1
+                # Dynamic gameweek suffix
                 gameweek_suffix = f"_{current_gameweek}"
+                
+                # DEBUG: Print available columns to see transfer data
+                available_cols = [col for col in row.index if 'transfer' in col.lower()]
+                print(f"Available transfer columns for GW {current_gameweek}: {available_cols}")
                 
                 gameweek_record = {
                     'league_id': safe_int(row.get('league_id')),
                     'entry_id': safe_int(row.get('Player Entry')),
                     'gameweek': current_gameweek,
-                    'points': safe_int(row.get(f'points{gameweek_suffix}')),  # ✅ Dynamic gameweek
+                    'points': safe_int(row.get(f'points{gameweek_suffix}')),
                     'total_points': safe_int(row.get('Player Points')),
                     'points_net': safe_int(row.get(f'pointsnet{gameweek_suffix}')),
                     'bank': safe_int(row.get(f'bank{gameweek_suffix}')),
                     'team_value': safe_int(row.get(f'value{gameweek_suffix}', 0) * 10 if row.get(f'value{gameweek_suffix}') is not None else 0),
-                    'transfers': safe_int(row.get(f'event_transfers{gameweek_suffix}')),
-                    'transfers_cost': safe_int(row.get(f'event_transfers_cost{gameweek_suffix}')),
-                    'points_on_bench': safe_int(row.get(f'points_on_bench{gameweek_suffix}')),  # ✅ Dynamic gameweek
+                    'transfers': safe_int(row.get(f'event_transfers{gameweek_suffix}')),  # ✅ This should be the count
+                    'transfers_cost': safe_int(row.get(f'event_transfers_cost{gameweek_suffix}')),  # ✅ This should be the cost
+                    'points_on_bench': safe_int(row.get(f'points_on_bench{gameweek_suffix}')),
                     'captain_id': captain_id,
                     'captain_name': safe_str(row.get('Captain')),
                     'vice_captain_id': vice_captain_id,
@@ -372,6 +376,9 @@ class FPLDatabase:
                     'active_chip': active_chip,
                     'updated_at': current_time
                 }
+                
+                # DEBUG: Print transfer data for troubleshooting
+                print(f"Player {row.get('Player Entry')}: transfers={gameweek_record['transfers']}, cost={gameweek_record['transfers_cost']}")
                 
                 if gameweek_record['entry_id'] and gameweek_record['league_id']:
                     gameweek_data.append(gameweek_record)
